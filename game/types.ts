@@ -1,4 +1,5 @@
 
+
 import type { CountryDetails } from '../data/countryData';
 // Import Policy-related types if they are not self-contained in policies.ts
 // For now, assume policies.ts defines them and App.tsx will import from there.
@@ -36,14 +37,11 @@ export interface NationalSpirit {
   // mutuallyExclusive?: string[]; // IDs of other national spirits this one cannot co-exist with
 }
 
-// Re-using PolicyEffect from policies.ts for NationalSpirit effects
-// Ensure PolicyEffect is defined or imported if it's not implicitly available
 export interface PolicyEffect {
   type: 'one_time' | 'ongoing';
   stat: string;
-  // FIX: Allow value to be number or string (for spirit IDs)
   value: number | string;
-  target?: 'self' | 'occupied_territories'; // For effects specific to occupied lands
+  target?: 'self' | 'occupied_territories'; 
 }
 
 
@@ -52,18 +50,22 @@ export interface OccupiedTerritory {
   resistanceLevel: number; // 0-100
   baseGdpContribution: number; // GDP value at time of conquest
   baseResourceContribution: number; // Resource value at time of conquest
-  garrisonPolicy?: string; // ID of an active policy affecting this territory (e.g., 'harsh_repression')
-  // lastResistanceUpdateTick: number; // To control frequency of resistance changes
+  garrisonPolicy?: string; 
   rebellionRisk: number; // 0-100, chance of rebellion
   productionDisruptionTicks: number; // Number of ticks production is halted/reduced
   rebelStrength: number; // Strength of active rebels in the territory
 }
 
 export interface CivilianBudgetAllocation {
-  economy: number;     // Percentage of civilian pool (0-100)
-  technology: number;  // Percentage of civilian pool (0-100)
-  diplomacy: number;   // Percentage of civilian pool (0-100)
-  resources: number;   // Percentage of civilian pool (0-100)
+  economy: number;     
+  technology: number;  
+  diplomacy: number;   
+  resources: number;   
+}
+
+export interface TruceDetails {
+  targetCountryId: string;
+  endTick: number;
 }
 
 export interface CountryInGame extends CountryDetails {
@@ -71,6 +73,11 @@ export interface CountryInGame extends CountryDetails {
   currentGDP: number;
   currentDefenseBudget: number;
   currentMilitary: {
+    army: number;
+    navy: number;
+    airforce: number;
+  };
+  currentMaxMilitary: { // Added for dynamic max military based on occupied territories
     army: number;
     navy: number;
     airforce: number;
@@ -90,25 +97,42 @@ export interface CountryInGame extends CountryDetails {
   nationalSpiritEffectModifiers: Record<string, number>; 
   occupiedTerritoryData: Record<string, OccupiedTerritory>; 
 
-  // Budget Management
-  defenseBudgetRatio: number; // Percentage of GDP allocated to defense (0-100)
+  defenseBudgetRatio: number; 
   civilianAllocation: CivilianBudgetAllocation;
-  autoManageBudget: boolean;
-  eliminatedTick?: number; // Tick when the country was eliminated
+  autoManageBudget: boolean; // This is for the player's budget delegation
+  eliminatedTick?: number; 
+
+  // Diplomacy Fields
+  relations: Record<string, number>; // Key: countryId, Value: relation score (-100 to 100)
+  allies: string[]; // List of country IDs this country is allied with
+  truces: TruceDetails[]; // List of active truces
+  pendingDiplomaticProposals: DiplomaticProposal[]; // Incoming proposals
 }
+
+export type DiplomaticProposalType = 'alliance_offer' | 'truce_offer';
+
+export interface DiplomaticProposal {
+  id: string; // Unique ID for the proposal
+  type: DiplomaticProposalType;
+  fromCountryId: string;
+  toCountryId: string; // Should be the player if it's an incoming proposal for them
+  // Optional: specific terms, e.g., for peace
+  expiresTick?: number; // Some proposals might expire
+}
+
 
 export interface WarDetails {
   id: string; 
   attackerId: string;
   defenderId: string;
-  startDate: GameDate; // Use the full GameDate object
+  startDate: GameDate; 
   ticksToResolution: number; 
 }
 
 export interface RankedCountry {
   countryName: string;
   rank: number;
-  eliminatedTick?: number; // Tick of elimination, undefined if winner
+  eliminatedTick?: number; 
   isPlayer: boolean;
 }
 
@@ -125,12 +149,12 @@ export const AVAILABLE_GAME_SPEEDS: GameSpeed[] = [
   { id: 'fast', label: '빠르게 (8x)', ticksPerSecond: 8 },    
 ];
 
-export const INITIAL_GAME_ERA_ID = "era_early"; // Default starting era
+export const INITIAL_GAME_ERA_ID = "era_early"; 
 
 export const INITIAL_GAME_DATE: GameDate = { year: 1, day: 1, currentEraId: INITIAL_GAME_ERA_ID };
 export const DAYS_IN_YEAR = 365;
 export const BASE_POLITICAL_CAPITAL_PER_TICK = 0.05; 
-export const POLITICAL_CAPITAL_FROM_DIPLOMACY_SCALE = 2000; 
+export const POLITICAL_CAPITAL_FROM_DIPLOMACY_SCALE = 500; // Changed from 2000 to 500
 export const MAX_POLITICAL_CAPITAL = 200;
 
 export const BASE_GDP_GROWTH_RATE_PER_TICK = 0.0001; 
@@ -138,12 +162,16 @@ export const BASE_TECH_POINTS_PER_TICK = 0.1;
 export const BASE_DIPLOMACY_POINTS_PER_TICK = 0.02;
 export const BASE_RESOURCE_POINTS_PER_TICK = 0.01; 
 export const BASE_AGGRESSION_DECAY_PER_TICK = 0.05; 
+export const MAX_AGGRESSION = 100;
+export const WAR_TICKS_DURATION = 20;
+
 
 // Occupation and Resistance Constants
 export const INITIAL_RESISTANCE_LEVEL = 10;
 export const RESISTANCE_GROWTH_PER_TICK = 0.05; 
 export const MAX_RESISTANCE_LEVEL = 100;
 export const RESISTANCE_INCOME_PENALTY_FACTOR = 0.75; 
+export const OCCUPIED_TERRITORY_MAX_MILITARY_BONUS_FACTOR = 0.1; // Changed from 0.02 to 0.1 (10%)
 
 // Rebellion System Constants
 export const INITIAL_REBELLION_RISK = 0;
@@ -167,31 +195,57 @@ export const REBEL_STRENGTH_DISRUPTION_THRESHOLD = 10;
 
 // Military Recovery Constants
 export const RECOVERY_TECH_BONUS_SCALE = 2000;
-export const RECOVERY_BUDGET_ALLOCATION_EFFECT_SCALE = 0.03; // Was 0.05
+export const RECOVERY_BUDGET_ALLOCATION_EFFECT_SCALE = 0.03; 
 export const RECOVERY_MANPOWER_AVAILABILITY_SCALE = 50000000;
 export const BASE_RECOVERY_POINTS_PER_TICK = 0.5;
 export const RECOVERY_COST_BUDGET_PER_UNIT = 250000000;
 export const RECOVERY_COST_POP_PER_UNIT = 300;
 
 // Budget System Constants
-export const DEFAULT_DEFENSE_BUDGET_RATIO = 5; // 5% of GDP
+export const DEFAULT_DEFENSE_BUDGET_RATIO = 5; 
 export const DEFAULT_CIVILIAN_ALLOCATION: CivilianBudgetAllocation = { economy: 30, technology: 30, diplomacy: 20, resources: 20 };
 
-export const MAX_DEFENSE_BUDGET_RATIO_SOFT_CAP = 15; // Penalties start kicking in beyond this % of GDP for defense
-export const MAX_DEFENSE_BUDGET_RATIO_HARD_CAP = 50; // Absolute max for defense spending %
+export const MAX_DEFENSE_BUDGET_RATIO_SOFT_CAP = 15; 
+export const MAX_DEFENSE_BUDGET_RATIO_HARD_CAP = 50; 
 
-export const DEFENSE_SPENDING_PENALTY_GDP_FACTOR = 0.000015; // Was 0.00001
-export const DEFENSE_SPENDING_PENALTY_RESOURCE_FACTOR = 0.0007; // Was 0.0005
-export const DEFENSE_SPENDING_PENALTY_DIPLOMACY_FACTOR = 0.0003; // Was 0.0002
+export const DEFENSE_SPENDING_PENALTY_GDP_FACTOR = 0.000015; 
+export const DEFENSE_SPENDING_PENALTY_RESOURCE_FACTOR = 0.0007; 
+export const DEFENSE_SPENDING_PENALTY_DIPLOMACY_FACTOR = 0.0003; 
 
-// Budget effectiveness scaling factors: budget_allocation_percentage / SCALE_FACTOR = bonus multiplier component
-export const BUDGET_ECONOMY_EFFECT_SCALE = 70; // Was 100
-export const BUDGET_TECHNOLOGY_EFFECT_SCALE = 170; // Was 200
-export const BUDGET_DIPLOMACY_EFFECT_SCALE = 180; // Was 250
-export const BUDGET_RESOURCES_EFFECT_SCALE = 180; // Was 250
+export const BUDGET_ECONOMY_EFFECT_SCALE = 70; 
+export const BUDGET_TECHNOLOGY_EFFECT_SCALE = 170; 
+export const BUDGET_DIPLOMACY_EFFECT_SCALE = 180; 
+export const BUDGET_RESOURCES_EFFECT_SCALE = 180; 
+
+// Diplomacy Constants
+export const RELATIONS_MAX = 100;
+export const RELATIONS_MIN = -100;
+export const RELATIONS_NEUTRAL = 0;
+export const RELATIONS_INITIAL_DEFAULT = 0;
+export const RELATIONS_PASSIVE_DECAY_PER_TICK = 0.01; // Rate at which relations move towards neutral
+export const ALLIANCE_RELATION_THRESHOLD = 50; // Min relation score to propose an alliance
+export const TRUCE_RELATION_IMPROVEMENT_ON_ACCEPT = 10;
+export const DEFAULT_TRUCE_DURATION_TICKS = 365 * 5; // 5 years
+
+export const PC_COST_IMPROVE_RELATIONS = 10;
+export const PC_COST_HARM_RELATIONS = 5;
+export const PC_COST_PROPOSE_ALLIANCE = 20;
+export const PC_COST_BREAK_ALLIANCE_PENALTY = 30; // PC penalty in addition to relation hit
+export const PC_COST_OFFER_TRUCE = 10;
+export const PC_COST_DECLARE_WAR = 25;
+
+export const AGGRESSION_HIT_BREAK_ALLIANCE = 20;
+export const AGGRESSION_HIT_BREAK_TRUCE = 30; // If a truce is broken *before* expiry
+export const AGGRESSION_HIT_DECLARE_WAR = 15; // Base, can be modified by context
+
+export const RELATION_HIT_BREAK_ALLIANCE_WITH_ALLY = -50;
+export const RELATION_HIT_BREAK_ALLIANCE_THIRD_PARTY = -10; // Impact on relations with other allies of the broken ally
+export const RELATION_HIT_DECLARE_WAR = -75;
+export const RELATION_IMPROVEMENT_PER_ACTION = 15;
+export const RELATION_HARM_PER_ACTION = -15;
+export const RELATION_PASSIVE_ALLY_BONUS_PER_TICK = 0.02;
 
 
-// New stat strings for policy/spirit effects:
 export const EffectStats = {
   GDP_GROWTH_RATE_PERC: 'gdp_growth_rate_perc_bonus', 
   TECH_POINTS_PER_TICK_FLAT: 'tech_points_per_tick_flat_bonus',

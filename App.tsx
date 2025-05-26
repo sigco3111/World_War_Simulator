@@ -1,11 +1,16 @@
 
+
+
+
+
+
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import WorldMap from './components/WorldMap';
 import GameControls from './components/GameControls';
 import EventLog from './components/EventLog';
 import GameSummaryModal from './components/GameSummaryModal';
 import { countryDetailsData, CountryDetails } from './data/countryData';
-import type { GameMode, GameDate, GameSpeed, CountryInGame, WarDetails, FinalGameOutcome, Era, NationalSpirit, PolicyEffect, OccupiedTerritory, CivilianBudgetAllocation, RankedCountry } from './game/types';
+import type { GameMode, GameDate, GameSpeed, CountryInGame, WarDetails, FinalGameOutcome, Era, NationalSpirit, PolicyEffect, OccupiedTerritory, CivilianBudgetAllocation, RankedCountry, DiplomaticProposal, TruceDetails } from './game/types';
 import { 
   AVAILABLE_GAME_SPEEDS, INITIAL_GAME_DATE, DAYS_IN_YEAR, 
   BASE_POLITICAL_CAPITAL_PER_TICK, POLITICAL_CAPITAL_FROM_DIPLOMACY_SCALE, MAX_POLITICAL_CAPITAL,
@@ -24,7 +29,12 @@ import {
   DEFAULT_DEFENSE_BUDGET_RATIO, DEFAULT_CIVILIAN_ALLOCATION,
   MAX_DEFENSE_BUDGET_RATIO_SOFT_CAP, MAX_DEFENSE_BUDGET_RATIO_HARD_CAP,
   DEFENSE_SPENDING_PENALTY_GDP_FACTOR, DEFENSE_SPENDING_PENALTY_RESOURCE_FACTOR, DEFENSE_SPENDING_PENALTY_DIPLOMACY_FACTOR,
-  BUDGET_ECONOMY_EFFECT_SCALE, BUDGET_TECHNOLOGY_EFFECT_SCALE, BUDGET_DIPLOMACY_EFFECT_SCALE, BUDGET_RESOURCES_EFFECT_SCALE
+  BUDGET_ECONOMY_EFFECT_SCALE, BUDGET_TECHNOLOGY_EFFECT_SCALE, BUDGET_DIPLOMACY_EFFECT_SCALE, BUDGET_RESOURCES_EFFECT_SCALE,
+  RELATIONS_INITIAL_DEFAULT, ALLIANCE_RELATION_THRESHOLD, PC_COST_PROPOSE_ALLIANCE, PC_COST_DECLARE_WAR, AGGRESSION_HIT_DECLARE_WAR,
+  WAR_TICKS_DURATION, MAX_AGGRESSION,
+  RELATIONS_MAX, RELATIONS_MIN, RELATION_IMPROVEMENT_PER_ACTION, RELATION_HARM_PER_ACTION,
+  PC_COST_IMPROVE_RELATIONS, PC_COST_HARM_RELATIONS, PC_COST_BREAK_ALLIANCE_PENALTY, AGGRESSION_HIT_BREAK_ALLIANCE, RELATION_HIT_BREAK_ALLIANCE_WITH_ALLY,
+  PC_COST_OFFER_TRUCE, DEFAULT_TRUCE_DURATION_TICKS, TRUCE_RELATION_IMPROVEMENT_ON_ACCEPT, RELATION_HIT_DECLARE_WAR, AGGRESSION_HIT_BREAK_TRUCE
 } from './game/types';
 import { ALL_POLICIES, Policy } from './game/policies';
 import { ALL_ERAS } from './game/eras'; 
@@ -38,8 +48,7 @@ export interface StatHistoryEntry {
   resources: number;
 }
 
-const MAX_AGGRESSION = 100;
-const WAR_TICKS_DURATION = 20; 
+
 const MAX_LOG_ENTRIES = 200;
 
 const RECOVERY_TECH_BONUS_SCALE = 2000; 
@@ -63,12 +72,13 @@ const App: React.FC = () => {
   const [finalGameOutcome, setFinalGameOutcome] = useState<FinalGameOutcome | null>(null);
 
   const [autoEnactPolicies, setAutoEnactPolicies] = useState<boolean>(true); 
+  const [autoDelegateDiplomacy, setAutoDelegateDiplomacy] = useState<boolean>(true);
   const [totalTicks, setTotalTicks] = useState<number>(0);
   const [playerStatHistory, setPlayerStatHistory] = useState<StatHistoryEntry[]>([]);
 
 
   const addLogEntry = useCallback((message: string, date?: GameDate) => {
-    const logPrefix = date ? `[${date.year}년 ${date.day}일 (${ALL_ERAS[date.currentEraId]?.name || '알 수 없는 시대'})] ` : '';
+    const logPrefix = date ? `[${date.year}년 ${date.day}일] ` : ''; // Era name removed from log prefix
     setGameLogs(prevLogs => {
       const newLog = `${logPrefix}${message}`;
       const updatedLogs = [newLog, ...prevLogs];
@@ -118,8 +128,10 @@ const App: React.FC = () => {
 
   const initializeGameData = useCallback(() => {
     const initialGameStates: Record<string, CountryInGame> = {};
-    Object.entries(countryDetailsData).forEach(([id, details]) => {
-      if (id === "DEFAULT") return;
+    const countryIds = Object.keys(countryDetailsData).filter(id => id !== "DEFAULT");
+
+    countryIds.forEach(id => {
+      const details = countryDetailsData[id];
       const occupiedTerritoryDataWithRebels: Record<string, OccupiedTerritory> = {}; 
       
       let baseCountry: CountryInGame = {
@@ -128,6 +140,12 @@ const App: React.FC = () => {
         currentGDP: details.GDP ?? 0,
         currentDefenseBudget: details.국방예산 ?? 0, // Will be recalculated based on defenseBudgetRatio
         currentMilitary: {
+          army: details.육군전투력 ?? 50,
+          navy: details.해군전투력 ?? 50,
+          airforce: details.공군전투력 ?? 50,
+        },
+        // FIX: Initialize currentMaxMilitary
+        currentMaxMilitary: {
           army: details.육군전투력 ?? 50,
           navy: details.해군전투력 ?? 50,
           airforce: details.공군전투력 ?? 50,
@@ -150,13 +168,33 @@ const App: React.FC = () => {
         defenseBudgetRatio: DEFAULT_DEFENSE_BUDGET_RATIO,
         civilianAllocation: { ...DEFAULT_CIVILIAN_ALLOCATION },
         autoManageBudget: true,
-        eliminatedTick: undefined, 
+        eliminatedTick: undefined,
+        relations: {},
+        allies: [],
+        truces: [],
+        pendingDiplomaticProposals: [],
       };
       baseCountry.currentDefenseBudget = baseCountry.currentGDP * (baseCountry.defenseBudgetRatio / 100);
       baseCountry = recalculatePolicyEffectModifiers(baseCountry); 
       baseCountry = recalculateNationalSpiritEffectModifiers(baseCountry); 
       initialGameStates[id] = baseCountry;
     });
+
+    // Initialize relations between all countries
+    countryIds.forEach(id1 => {
+        countryIds.forEach(id2 => {
+            if (id1 !== id2) {
+                if (!initialGameStates[id1].relations[id2]) {
+                    initialGameStates[id1].relations[id2] = RELATIONS_INITIAL_DEFAULT;
+                }
+                if (!initialGameStates[id2].relations[id1]) {
+                   initialGameStates[id2].relations[id1] = RELATIONS_INITIAL_DEFAULT;
+                }
+            }
+        });
+    });
+
+
     setAllCountriesState(initialGameStates);
     setCurrentDate({...INITIAL_GAME_DATE, currentEraId: INITIAL_GAME_ERA_ID }); 
     setGameLogs([]); 
@@ -164,6 +202,7 @@ const App: React.FC = () => {
     setIsSummaryModalOpen(false);
     setFinalGameOutcome(null);
     setAutoEnactPolicies(true); 
+    setAutoDelegateDiplomacy(true);
     setTotalTicks(0);
     setPlayerStatHistory([]);
   }, [addLogEntry, recalculatePolicyEffectModifiers, recalculateNationalSpiritEffectModifiers]);
@@ -268,6 +307,15 @@ const App: React.FC = () => {
     });
   }, [addLogEntry, currentDate]);
 
+  const handleToggleAutoDelegateDiplomacy = useCallback(() => {
+    setAutoDelegateDiplomacy(prev => {
+        const newState = !prev;
+        addLogEntry(`외교 자동 위임 기능이 ${newState ? '활성화' : '비활성화'}되었습니다.`, currentDate);
+        return newState;
+    });
+  }, [addLogEntry, currentDate]);
+
+
   // Budget Management Callbacks
   const handleUpdateDefenseBudgetRatio = useCallback((countryId: string, newRatio: number) => {
     setAllCountriesState(prev => {
@@ -318,43 +366,65 @@ const App: React.FC = () => {
   }, [addLogEntry, currentDate]);
 
 
-  const handleStartGame = useCallback((countryId: string) => {
-    setPlayerCountryId(countryId);
+  const handleStartGame = useCallback((selectedPlayerCountryId: string) => {
+    setPlayerCountryId(selectedPlayerCountryId);
     const gameStartDate = { ...INITIAL_GAME_DATE, currentEraId: INITIAL_GAME_ERA_ID };
     setCurrentDate(gameStartDate);
 
-    setAllCountriesState(prevStatic => {
+    setAllCountriesState(() => {
       const newInitialStates: Record<string, CountryInGame> = {};
-        Object.entries(countryDetailsData).forEach(([id, details]) => {
-            if (id === "DEFAULT") return;
+      const countryIds = Object.keys(countryDetailsData).filter(id => id !== "DEFAULT");
+
+      countryIds.forEach(id => {
+            const details = countryDetailsData[id];
             const occupiedTerritoryDataWithRebels: Record<string, OccupiedTerritory> = {};
             let baseCountry: CountryInGame = {
                 ...details,
                 currentPopulation: details.인구수 ?? 0,
                 currentGDP: details.GDP ?? 0,
-                currentDefenseBudget: 0, // Will be set by defenseBudgetRatio
+                currentDefenseBudget: 0, 
                 currentMilitary: { army: details.육군전투력 ?? 50, navy: details.해군전투력 ?? 50, airforce: details.공군전투력 ?? 50 },
+                // FIX: Initialize currentMaxMilitary
+                currentMaxMilitary: { army: details.육군전투력 ?? 50, navy: details.해군전투력 ?? 50, airforce: details.공군전투력 ?? 50 },
                 경제력: details.경제력 ?? 50, 기술력: details.기술력 ?? 50, 외교력: details.외교력 ?? 50, 자원보유량: details.자원보유량 ?? 50,
                 territories: [id],
                 isEliminated: false,
                 atWarWith: [],
                 aggressionScore: Math.floor(Math.random() * 30) + 5,
-                isPlayer: id === countryId,
-                politicalCapital: 50,
+                isPlayer: id === selectedPlayerCountryId,
+                politicalCapital: id === selectedPlayerCountryId ? 75 : 50, // Player gets a bit more PC
                 activePolicies: [],
                 policyEffectModifiers: {},
                 nationalSpirits: [],
                 nationalSpiritEffectModifiers: {},
                 occupiedTerritoryData: occupiedTerritoryDataWithRebels,
-                defenseBudgetRatio: id === countryId ? DEFAULT_DEFENSE_BUDGET_RATIO : (Math.floor(Math.random() * 5) + 3), // AI countries get random initial
-                civilianAllocation: { ...DEFAULT_CIVILIAN_ALLOCATION }, // TODO: AI can have varied initial
-                autoManageBudget: true, // Player default ON, AI always ON (effectively)
+                defenseBudgetRatio: id === selectedPlayerCountryId ? DEFAULT_DEFENSE_BUDGET_RATIO : (Math.floor(Math.random() * 5) + 3), 
+                civilianAllocation: { ...DEFAULT_CIVILIAN_ALLOCATION }, 
+                autoManageBudget: id === selectedPlayerCountryId ? true : true, // Player default auto, AI auto
                 eliminatedTick: undefined,
+                relations: {},
+                allies: [],
+                truces: [],
+                pendingDiplomaticProposals: [],
             };
             baseCountry.currentDefenseBudget = baseCountry.currentGDP * (baseCountry.defenseBudgetRatio / 100);
             baseCountry = recalculatePolicyEffectModifiers(baseCountry);
             baseCountry = recalculateNationalSpiritEffectModifiers(baseCountry);
             newInitialStates[id] = baseCountry;
+        });
+        
+        // Initialize relations between all countries
+        countryIds.forEach(id1 => {
+            countryIds.forEach(id2 => {
+                if (id1 !== id2) {
+                    if (!newInitialStates[id1].relations[id2]) {
+                        newInitialStates[id1].relations[id2] = RELATIONS_INITIAL_DEFAULT;
+                    }
+                    if (!newInitialStates[id2].relations[id1]) {
+                       newInitialStates[id2].relations[id1] = RELATIONS_INITIAL_DEFAULT;
+                    }
+                }
+            });
         });
       return newInitialStates;
     });
@@ -364,13 +434,13 @@ const App: React.FC = () => {
     setTotalTicks(0);
     setPlayerStatHistory([]); 
     setAutoEnactPolicies(true); 
+    setAutoDelegateDiplomacy(true);
     setCurrentGameSpeed(AVAILABLE_GAME_SPEEDS.find(s => s.id === 'normal') || AVAILABLE_GAME_SPEEDS[2]);
-    const startedCountryName = countryDetailsData[countryId]?.국가명 || '선택한 국가';
-    const startMessage = `${startedCountryName}로 시뮬레이션을 시작합니다.`;
+    const startedCountryName = countryDetailsData[selectedPlayerCountryId]?.국가명 || '선택한 국가';
+    const startMessage = `${startedCountryName}(으)로 시뮬레이션을 시작합니다.`;
     setGameMessage(startMessage);
     addLogEntry(startMessage, gameStartDate);
   }, [addLogEntry, recalculatePolicyEffectModifiers, recalculateNationalSpiritEffectModifiers]);
-
 
   const handleSpeedChange = useCallback((speedId: GameSpeed['id']) => {
     const newSpeed = AVAILABLE_GAME_SPEEDS.find(s => s.id === speedId) || AVAILABLE_GAME_SPEEDS[0];
@@ -389,6 +459,237 @@ const App: React.FC = () => {
       }
     }
   }, [gameMode, addLogEntry, currentDate, gameLogs]);
+
+
+  // Diplomacy Action Handlers
+  const handleImproveRelations = useCallback((sourceId: string, targetId: string) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const sourceCountry = current[sourceId];
+      const targetCountry = current[targetId];
+
+      if (!sourceCountry || !targetCountry || sourceCountry.isEliminated || targetCountry.isEliminated) return prev;
+      if (sourceCountry.allies.includes(targetId)) {
+        addLogEntry(`${sourceCountry.국가명}: ${targetCountry.국가명}와(과)는 이미 동맹입니다.`, currentDate);
+        return prev;
+      }
+      if (sourceCountry.politicalCapital < PC_COST_IMPROVE_RELATIONS) {
+        addLogEntry(`${sourceCountry.국가명}: 관계 개선에 필요한 정치 자본(${PC_COST_IMPROVE_RELATIONS})이 부족합니다. (현재: ${sourceCountry.politicalCapital.toFixed(1)})`, currentDate);
+        return prev;
+      }
+
+      sourceCountry.politicalCapital -= PC_COST_IMPROVE_RELATIONS;
+      sourceCountry.relations[targetId] = Math.min(RELATIONS_MAX, (sourceCountry.relations[targetId] || 0) + RELATION_IMPROVEMENT_PER_ACTION);
+      targetCountry.relations[sourceId] = Math.min(RELATIONS_MAX, (targetCountry.relations[sourceId] || 0) + RELATION_IMPROVEMENT_PER_ACTION);
+      
+      addLogEntry(`${sourceCountry.국가명}이(가) ${targetCountry.국가명}와(과)의 관계를 개선했습니다. (관계: ${sourceCountry.relations[targetId].toFixed(0)})`, currentDate);
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
+
+  const handleHarmRelations = useCallback((sourceId: string, targetId: string) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const sourceCountry = current[sourceId];
+      const targetCountry = current[targetId];
+
+      if (!sourceCountry || !targetCountry || sourceCountry.isEliminated || targetCountry.isEliminated) return prev;
+      if (sourceCountry.politicalCapital < PC_COST_HARM_RELATIONS) {
+        addLogEntry(`${sourceCountry.국가명}: 관계 악화에 필요한 정치 자본(${PC_COST_HARM_RELATIONS})이 부족합니다. (현재: ${sourceCountry.politicalCapital.toFixed(1)})`, currentDate);
+        return prev;
+      }
+
+      sourceCountry.politicalCapital -= PC_COST_HARM_RELATIONS;
+      sourceCountry.relations[targetId] = Math.max(RELATIONS_MIN, (sourceCountry.relations[targetId] || 0) + RELATION_HARM_PER_ACTION);
+      targetCountry.relations[sourceId] = Math.max(RELATIONS_MIN, (targetCountry.relations[sourceId] || 0) + RELATION_HARM_PER_ACTION);
+
+      addLogEntry(`${sourceCountry.국가명}이(가) ${targetCountry.국가명}와(과)의 관계를 악화시켰습니다. (관계: ${sourceCountry.relations[targetId].toFixed(0)})`, currentDate);
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
+
+  const handleProposeAlliance = useCallback((sourceId: string, targetId: string) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const sourceCountry = current[sourceId];
+      const targetCountry = current[targetId];
+
+      if (!sourceCountry || !targetCountry || sourceCountry.isEliminated || targetCountry.isEliminated) return prev;
+      if (sourceCountry.politicalCapital < PC_COST_PROPOSE_ALLIANCE) {
+        addLogEntry(`${sourceCountry.국가명}: 동맹 제안에 필요한 정치 자본(${PC_COST_PROPOSE_ALLIANCE})이 부족합니다.`, currentDate); return prev;
+      }
+      if ((sourceCountry.relations[targetId] || 0) < ALLIANCE_RELATION_THRESHOLD) {
+        addLogEntry(`${sourceCountry.국가명}: ${targetCountry.국가명}와(과)의 관계(${(sourceCountry.relations[targetId] || 0).toFixed(0)})가 동맹 제안 기준(${ALLIANCE_RELATION_THRESHOLD}) 미만입니다.`, currentDate); return prev;
+      }
+      if (sourceCountry.allies.includes(targetId) || sourceCountry.atWarWith.includes(targetId) || sourceCountry.truces.some(t => t.targetCountryId === targetId && t.endTick > totalTicks)) {
+        addLogEntry(`${sourceCountry.국가명}: ${targetCountry.국가명}와(과)는 현재 동맹 제안을 할 수 없는 관계입니다.`, currentDate); return prev;
+      }
+
+      sourceCountry.politicalCapital -= PC_COST_PROPOSE_ALLIANCE;
+      const proposalId = `alliance_${sourceId}_${targetId}_${totalTicks}`;
+      const proposal: DiplomaticProposal = {
+        id: proposalId, type: 'alliance_offer', fromCountryId: sourceId, toCountryId: targetId, expiresTick: totalTicks + (DAYS_IN_YEAR / 2)
+      };
+      targetCountry.pendingDiplomaticProposals = [...(targetCountry.pendingDiplomaticProposals || []), proposal];
+      
+      addLogEntry(`${sourceCountry.국가명}이(가) ${targetCountry.국가명}에게 동맹을 제안했습니다.`, currentDate);
+      current[sourceId] = sourceCountry;
+      current[targetId] = targetCountry;
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
+
+  const handleBreakAlliance = useCallback((sourceId: string, allyIdToBreak: string) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const sourceCountry = current[sourceId];
+      const allyToBreakCountry = current[allyIdToBreak];
+
+      if (!sourceCountry || !allyToBreakCountry || sourceCountry.isEliminated || allyToBreakCountry.isEliminated || !sourceCountry.allies.includes(allyIdToBreak)) return prev;
+
+      sourceCountry.politicalCapital = Math.max(0, sourceCountry.politicalCapital - PC_COST_BREAK_ALLIANCE_PENALTY);
+      sourceCountry.aggressionScore = Math.min(MAX_AGGRESSION, sourceCountry.aggressionScore + AGGRESSION_HIT_BREAK_ALLIANCE);
+      
+      const relationUpdate = (country: CountryInGame, otherId: string) => {
+        country.relations[otherId] = Math.max(RELATIONS_MIN, (country.relations[otherId] || 0) + RELATION_HIT_BREAK_ALLIANCE_WITH_ALLY);
+      };
+      relationUpdate(sourceCountry, allyIdToBreak);
+      relationUpdate(allyToBreakCountry, sourceId);
+
+      sourceCountry.allies = sourceCountry.allies.filter(ally => ally !== allyIdToBreak);
+      allyToBreakCountry.allies = allyToBreakCountry.allies.filter(ally => ally !== sourceId);
+
+      addLogEntry(`${sourceCountry.국가명}이(가) ${allyToBreakCountry.국가명}와(과)의 동맹을 파기했습니다.`, currentDate);
+      current[sourceId] = sourceCountry;
+      current[allyIdToBreak] = allyToBreakCountry;
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
+  
+  const handleOfferTruce = useCallback((sourceId: string, targetId: string) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const sourceCountry = current[sourceId];
+      const targetCountry = current[targetId];
+
+      if (!sourceCountry || !targetCountry || sourceCountry.isEliminated || targetCountry.isEliminated) return prev;
+      if (!sourceCountry.atWarWith.includes(targetId)) {
+         addLogEntry(`${sourceCountry.국가명}: ${targetCountry.국가명}와(과)는 현재 전쟁 중이 아닙니다.`, currentDate); return prev;
+      }
+      if (sourceCountry.politicalCapital < PC_COST_OFFER_TRUCE) {
+        addLogEntry(`${sourceCountry.국가명}: 휴전 제안에 필요한 정치 자본(${PC_COST_OFFER_TRUCE})이 부족합니다.`, currentDate); return prev;
+      }
+      
+      sourceCountry.politicalCapital -= PC_COST_OFFER_TRUCE;
+      const proposalId = `truce_${sourceId}_${targetId}_${totalTicks}`;
+      const proposal: DiplomaticProposal = {
+        id: proposalId, type: 'truce_offer', fromCountryId: sourceId, toCountryId: targetId, expiresTick: totalTicks + (DAYS_IN_YEAR / 4)
+      };
+      targetCountry.pendingDiplomaticProposals = [...(targetCountry.pendingDiplomaticProposals || []), proposal];
+
+      addLogEntry(`${sourceCountry.국가명}이(가) ${targetCountry.국가명}에게 휴전을 제안했습니다.`, currentDate);
+      current[sourceId] = sourceCountry;
+      current[targetId] = targetCountry;
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
+
+  const handleDeclareWar = useCallback((attackerId: string, defenderId: string) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const attacker = current[attackerId];
+      const defender = current[defenderId];
+
+      if (!attacker || !defender || attacker.isEliminated || defender.isEliminated) return prev;
+      if (attacker.politicalCapital < PC_COST_DECLARE_WAR) {
+        addLogEntry(`${attacker.국가명}: 선전포고에 필요한 정치 자본(${PC_COST_DECLARE_WAR})이 부족합니다.`, currentDate); return prev;
+      }
+      if (attacker.allies.includes(defenderId) || attacker.atWarWith.includes(defenderId) || attacker.truces.some(t => t.targetCountryId === defenderId && t.endTick > totalTicks)) {
+         addLogEntry(`${attacker.국가명}: ${defender.국가명}에 현재 선전포고를 할 수 없습니다 (동맹/전쟁중/휴전중).`, currentDate); return prev;
+      }
+
+      attacker.politicalCapital -= PC_COST_DECLARE_WAR;
+      attacker.aggressionScore = Math.min(MAX_AGGRESSION, attacker.aggressionScore + AGGRESSION_HIT_DECLARE_WAR);
+      attacker.relations[defenderId] = RELATION_HIT_DECLARE_WAR;
+      defender.relations[attackerId] = RELATION_HIT_DECLARE_WAR;
+
+      attacker.atWarWith = [...new Set([...attacker.atWarWith, defenderId])];
+      defender.atWarWith = [...new Set([...defender.atWarWith, attackerId])];
+      
+      attacker.truces = attacker.truces.filter(t => t.targetCountryId !== defenderId);
+      defender.truces = defender.truces.filter(t => t.targetCountryId !== attackerId);
+
+      const newWar: WarDetails = {
+        id: `${attackerId}_vs_${defenderId}_${currentDate.year}-${currentDate.day}-${totalTicks}`,
+        attackerId: attackerId,
+        defenderId: defenderId,
+        startDate: currentDate,
+        ticksToResolution: WAR_TICKS_DURATION + Math.floor(Math.random() * 10) - 5,
+      };
+      setActiveWars(prevWars => [...prevWars, newWar]);
+      addLogEntry(`${attacker.국가명}이(가) ${defender.국가명}에 선전포고했습니다!`, currentDate);
+      current[attackerId] = attacker;
+      current[defenderId] = defender;
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
+  
+  const handleRespondToDiplomaticProposal = useCallback((respondingCountryId: string, proposalId: string, accepted: boolean) => {
+    setAllCountriesState(prev => {
+      const current = JSON.parse(JSON.stringify(prev)) as Record<string, CountryInGame>;
+      const respondingCountry = current[respondingCountryId];
+      if (!respondingCountry || respondingCountry.isEliminated) return prev;
+
+      const proposalIndex = (respondingCountry.pendingDiplomaticProposals || []).findIndex(p => p.id === proposalId);
+      if (proposalIndex === -1) {
+        addLogEntry(`오류: ${respondingCountry.국가명}이(가) 존재하지 않는 외교 제안(${proposalId})에 응답하려 했습니다.`, currentDate);
+        return prev;
+      }
+      
+      const proposal = respondingCountry.pendingDiplomaticProposals[proposalIndex];
+      const fromCountry = current[proposal.fromCountryId];
+      if (!fromCountry || fromCountry.isEliminated) {
+          addLogEntry(`오류: 제안자 ${proposal.fromCountryId}가 존재하지 않거나 소멸되어 응답할 수 없습니다.`, currentDate);
+          respondingCountry.pendingDiplomaticProposals.splice(proposalIndex, 1);
+          current[respondingCountryId] = respondingCountry;
+          return current;
+      }
+
+      respondingCountry.pendingDiplomaticProposals.splice(proposalIndex, 1);
+
+      if (accepted) {
+        if (proposal.type === 'alliance_offer') {
+          respondingCountry.allies = [...new Set([...respondingCountry.allies, proposal.fromCountryId])];
+          fromCountry.allies = [...new Set([...fromCountry.allies, respondingCountryId])];
+          respondingCountry.relations[proposal.fromCountryId] = Math.min(RELATIONS_MAX, (respondingCountry.relations[proposal.fromCountryId] || 0) + 10);
+          fromCountry.relations[respondingCountryId] = Math.min(RELATIONS_MAX, (fromCountry.relations[respondingCountryId] || 0) + 10);
+          addLogEntry(`${respondingCountry.국가명}이(가) ${fromCountry.국가명}의 동맹 제안을 수락했습니다.`, currentDate);
+        } else if (proposal.type === 'truce_offer') {
+          respondingCountry.atWarWith = respondingCountry.atWarWith.filter(id => id !== proposal.fromCountryId);
+          fromCountry.atWarWith = fromCountry.atWarWith.filter(id => id !== respondingCountryId);
+          setActiveWars(prevWars => prevWars.filter(war =>
+            !((war.attackerId === respondingCountryId && war.defenderId === proposal.fromCountryId) ||
+              (war.attackerId === proposal.fromCountryId && war.defenderId === respondingCountryId))
+          ));
+          const truceEndTick = totalTicks + DEFAULT_TRUCE_DURATION_TICKS;
+          const newTruceForResponder: TruceDetails = { targetCountryId: proposal.fromCountryId, endTick: truceEndTick };
+          const newTruceForProposer: TruceDetails = { targetCountryId: respondingCountryId, endTick: truceEndTick };
+          respondingCountry.truces = [...(respondingCountry.truces || []), newTruceForResponder];
+          fromCountry.truces = [...(fromCountry.truces || []), newTruceForProposer];
+          respondingCountry.relations[proposal.fromCountryId] = Math.min(RELATIONS_MAX, (respondingCountry.relations[proposal.fromCountryId] || 0) + TRUCE_RELATION_IMPROVEMENT_ON_ACCEPT);
+          fromCountry.relations[respondingCountryId] = Math.min(RELATIONS_MAX, (fromCountry.relations[respondingCountryId] || 0) + TRUCE_RELATION_IMPROVEMENT_ON_ACCEPT);
+          addLogEntry(`${respondingCountry.국가명}이(가) ${fromCountry.국가명}의 휴전 제안을 수락했습니다. ${Math.ceil(DEFAULT_TRUCE_DURATION_TICKS/DAYS_IN_YEAR)}년간 휴전합니다.`, currentDate);
+        }
+      } else { // Rejected
+        respondingCountry.relations[proposal.fromCountryId] = Math.max(RELATIONS_MIN, (respondingCountry.relations[proposal.fromCountryId] || 0) - 5);
+        fromCountry.relations[respondingCountryId] = Math.max(RELATIONS_MIN, (fromCountry.relations[respondingCountryId] || 0) - 5);
+        addLogEntry(`${respondingCountry.국가명}이(가) ${fromCountry.국가명}의 ${proposal.type === 'alliance_offer' ? '동맹' : '휴전'} 제안을 거절했습니다.`, currentDate);
+      }
+      current[respondingCountryId] = respondingCountry;
+      current[proposal.fromCountryId] = fromCountry;
+      return current;
+    });
+  }, [currentDate, addLogEntry, totalTicks]);
 
   // Main Game Loop
   useEffect(() => {
@@ -427,12 +728,32 @@ const App: React.FC = () => {
 
       setAllCountriesState(prevCountries => {
         let newCountriesState: Record<string, CountryInGame> = JSON.parse(JSON.stringify(prevCountries)); 
-        let newActiveWarsState: WarDetails[] = JSON.parse(JSON.stringify(activeWars)); 
-        const resolvedWarIds = new Set<string>();
+        let newActiveWarsForTick: WarDetails[] = []; 
+
 
         Object.keys(newCountriesState).forEach(id => {
           const country = newCountriesState[id];
           if (country.isEliminated) return;
+
+          // Clear expired truces
+          country.truces = (country.truces || []).filter(truce => {
+            if (truce.endTick <= currentTickForProcessing) {
+              addLogEntry(`${country.국가명}와(과) ${newCountriesState[truce.targetCountryId]?.국가명 || '알 수 없는 국가'} 간의 휴전이 만료되었습니다.`, gameTickDateUpdate);
+              return false;
+            }
+            return true;
+          });
+
+          // Clear expired diplomatic proposals
+          country.pendingDiplomaticProposals = (country.pendingDiplomaticProposals || []).filter(proposal => {
+            if (proposal.expiresTick && proposal.expiresTick <= currentTickForProcessing) {
+              // Silently remove expired proposals, or add log if desired
+              // addLogEntry(`${newCountriesState[proposal.fromCountryId]?.국가명}이(가) ${country.국가명}에게 보낸 ${proposal.type} 제안이 만료되었습니다.`, gameTickDateUpdate);
+              return false;
+            }
+            return true;
+          });
+
 
           const policyMod = country.policyEffectModifiers;
           const spiritMod = country.nationalSpiritEffectModifiers;
@@ -467,12 +788,14 @@ const App: React.FC = () => {
                       allocations.diplomacy = Math.max(5, allocations.diplomacy + (100-currentTotal)*0.15);
                       allocations.resources = Math.max(5, allocations.resources + (100-currentTotal)*0.15);
                       currentTotal = allocations.economy + allocations.technology + allocations.diplomacy + allocations.resources;
-                      if(currentTotal !== 100) { // Final normalization pass
+                      if(currentTotal !== 100 && currentTotal > 0) { // Final normalization pass
                          const scaleFactor = 100 / currentTotal;
                          allocations.economy *= scaleFactor;
                          allocations.technology *= scaleFactor;
                          allocations.diplomacy *= scaleFactor;
                          allocations.resources *= scaleFactor;
+                      } else if (currentTotal === 0) { // Avoid division by zero, reset to default if all are zero
+                         allocations = { ...DEFAULT_CIVILIAN_ALLOCATION };
                       }
                   }
                   country.civilianAllocation = allocations;
@@ -484,6 +807,8 @@ const App: React.FC = () => {
               let sum = ca.economy + ca.technology + ca.diplomacy + ca.resources;
               if (sum !== 100 && sum > 0) {
                 ca.economy += (100-sum); // Add difference to economy
+              } else if (sum === 0) {
+                 ca = { ...DEFAULT_CIVILIAN_ALLOCATION }; // Reset if sum is zero
               }
               country.civilianAllocation = ca;
           }
@@ -636,9 +961,13 @@ const App: React.FC = () => {
           }
         });
 
+        // Consolidate activeWars from previous state and newly generated ones
+        let currentActiveWars = [...activeWars, ...newActiveWarsForTick];
+        const resolvedWarIds = new Set<string>();
 
-        for (let i = newActiveWarsState.length - 1; i >= 0; i--) {
-          const war = newActiveWarsState[i];
+
+        for (let i = currentActiveWars.length - 1; i >= 0; i--) {
+          const war = currentActiveWars[i];
           let attacker = newCountriesState[war.attackerId];
           let defender = newCountriesState[war.defenderId];
 
@@ -652,6 +981,7 @@ const App: React.FC = () => {
           const defenderSpiritMod = defender.nationalSpiritEffectModifiers;
 
           const attackerDefenseBonus = (attackerPolicyMod[EffectStats.DEFENSE_EFFECTIVENESS_PERC] || 0) + (attackerSpiritMod[EffectStats.DEFENSE_EFFECTIVENESS_PERC] || 0);
+          // FIX: Corrected typo from spiritMod to defenderSpiritMod
           const defenderDefenseBonus = (defenderPolicyMod[EffectStats.DEFENSE_EFFECTIVENESS_PERC] || 0) + (defenderSpiritMod[EffectStats.DEFENSE_EFFECTIVENESS_PERC] || 0);
           const attackerEnemyAttritionBonus = (attackerPolicyMod[EffectStats.ENEMY_ATTRITION_PERC] || 0) + (attackerSpiritMod[EffectStats.ENEMY_ATTRITION_PERC] || 0);
           const defenderEnemyAttritionBonus = (defenderPolicyMod[EffectStats.ENEMY_ATTRITION_PERC] || 0) + (defenderSpiritMod[EffectStats.ENEMY_ATTRITION_PERC] || 0);
@@ -696,10 +1026,6 @@ const App: React.FC = () => {
           attacker.currentGDP = Math.max(0, attacker.currentGDP * (1 - Math.min(0.015, attackerGdpLossRate))); 
           defender.currentGDP = Math.max(0, defender.currentGDP * (1 - Math.min(0.015, defenderGdpLossRate))); 
 
-          // Defense budget is now set by ratio, no need to reduce it directly here unless it's a special war effect.
-          // attacker.currentDefenseBudget = Math.max(0, attacker.currentDefenseBudget * (1 - Math.min(0.01, attackerGdpLossRate + 0.0001)));
-          // defender.currentDefenseBudget = Math.max(0, defender.currentDefenseBudget * (1 - Math.min(0.01, defenderGdpLossRate + 0.0001)));
-          
           if (attackerMilCasualtyRate > 0.02) attacker.기술력 = Math.max(10, Math.round(attacker.기술력! * 0.9995));
           if (defenderMilCasualtyRate > 0.02) defender.기술력 = Math.max(10, Math.round(defender.기술력! * 0.9995));
           if (war.attackerId === attacker.id && attacker.atWarWith.length > 1) attacker.외교력 = Math.max(10, Math.round(attacker.외교력! * 0.9998));
@@ -772,7 +1098,7 @@ const App: React.FC = () => {
               currentMilitary: {army:0,navy:0,airforce:0},
               atWarWith: attacker.atWarWith.filter(id => id !== war.defenderId),
               aggressionScore: Math.max(0, attacker.aggressionScore - 30),
-              isEliminated: true, // Attacker can also be eliminated if their military is wiped out
+              isEliminated: true, 
               eliminatedTick: currentTickForProcessing
             };
              newCountriesState[war.defenderId] = {
@@ -785,8 +1111,8 @@ const App: React.FC = () => {
             continue; 
           }
           
-          war.ticksToResolution -=1;
-          if (war.ticksToResolution <= 0) { 
+          currentActiveWars[i].ticksToResolution -=1; // Mutate the copy for this tick
+          if (currentActiveWars[i].ticksToResolution <= 0) { 
             resolvedWarIds.add(war.id);
             attacker = newCountriesState[war.attackerId]; 
             defender = newCountriesState[war.defenderId];
@@ -855,7 +1181,9 @@ const App: React.FC = () => {
             }
           }
         }
-        setActiveWars(prev => prev.filter(w => !resolvedWarIds.has(w.id)));
+        // Filter out resolved wars for the next state update
+        const nextActiveWars = currentActiveWars.filter(w => !resolvedWarIds.has(w.id));
+        setActiveWars(nextActiveWars);
         
         Object.keys(newCountriesState).forEach(id => {
           const country = newCountriesState[id];
@@ -903,7 +1231,7 @@ const App: React.FC = () => {
                   if (country.currentDefenseBudget >= budgetCost && country.currentPopulation >= popCost && actualRecoveryAmount > 0) {
                     country.currentMilitary[service.type] = parseFloat((country.currentMilitary[service.type] + actualRecoveryAmount).toFixed(2));
                     country.currentMilitary[service.type] = Math.min(service.max, country.currentMilitary[service.type]); 
-                    country.currentDefenseBudget -= budgetCost; // This reduces the available defense budget for this tick
+                    country.currentDefenseBudget -= budgetCost; 
                     country.currentPopulation -= Math.round(popCost);
                   }
                 }
@@ -922,10 +1250,10 @@ const App: React.FC = () => {
             country.aggressionScore += aggressionIncrease;
             country.aggressionScore = Math.min(MAX_AGGRESSION, Math.max(0, country.aggressionScore));
 
-
-            if (country.aggressionScore >= MAX_AGGRESSION * (0.9 + Math.random() * 0.1)) { 
+            // Existing Aggression-based War Declaration
+            if (country.aggressionScore >= MAX_AGGRESSION * (0.9 + Math.random() * 0.1) && !country.isPlayer) { 
               const potentialTargets = Object.values(newCountriesState).filter(
-                target => !target.isEliminated && target.id !== id && target.atWarWith.length === 0 && !target.territories.includes(id) && !country.territories.includes(target.id)
+                target => !target.isEliminated && target.id !== id && target.atWarWith.length === 0 && !target.territories.includes(id) && !country.territories.includes(target.id) && !country.allies.includes(target.id) && !country.truces.some(t => t.targetCountryId === target.id && t.endTick > currentTickForProcessing)
               );
 
               if (potentialTargets.length > 0) {
@@ -936,24 +1264,62 @@ const App: React.FC = () => {
                 country.aggressionScore = Math.max(0, country.aggressionScore - 70); 
                 
                 const newWar: WarDetails = {
-                  id: `${id}_vs_${target.id}_${gameTickDateUpdate.year}-${gameTickDateUpdate.day}-${Date.now()}`,
+                  id: `${id}_vs_${target.id}_${gameTickDateUpdate.year}-${gameTickDateUpdate.day}-${currentTickForProcessing}`,
                   attackerId: id,
                   defenderId: target.id,
                   startDate: gameTickDateUpdate,
                   ticksToResolution: WAR_TICKS_DURATION + Math.floor(Math.random() * 10) - 5,
                 };
-                setActiveWars(prev => [...prev, newWar]);
                 
-                newCountriesState[id] = {...country, atWarWith: [...country.atWarWith, target.id]}; 
-                newCountriesState[target.id] = {...newCountriesState[target.id], atWarWith: [...(newCountriesState[target.id].atWarWith || []), id]};
-                const warDeclarationMessage = `${country.국가명}이(가) ${target.국가명}에 선전포고했습니다!`;
-                setGameMessage(warDeclarationMessage);
-                addLogEntry(warDeclarationMessage, gameTickDateUpdate);
+                if (!nextActiveWars.some(w => (w.attackerId === newWar.attackerId && w.defenderId === newWar.defenderId) || (w.attackerId === newWar.defenderId && w.defenderId === newWar.attackerId) )) {
+                    newActiveWarsForTick.push(newWar); // Add to temporary list for this tick
+                    newCountriesState[id] = {...country, atWarWith: [...country.atWarWith, target.id]}; 
+                    newCountriesState[target.id] = {...newCountriesState[target.id], atWarWith: [...(newCountriesState[target.id].atWarWith || []), id]};
+                    const warDeclarationMessage = `${country.국가명}이(가) ${target.국가명}에 선전포고했습니다! (호전성 발발)`;
+                    setGameMessage(warDeclarationMessage);
+                    addLogEntry(warDeclarationMessage, gameTickDateUpdate);
+                }
               }
             }
+
+            // New: Auto Delegate Diplomacy War Declaration for AI
+            if (playerCountryId && newCountriesState[playerCountryId] && autoDelegateDiplomacy && !country.isPlayer && country.id !== playerCountryId && !country.isEliminated && country.atWarWith.length === 0 && !country.allies.includes(playerCountryId) && !country.truces.some(t => t.targetCountryId === playerCountryId && t.endTick > currentTickForProcessing)) {
+                const playerState = newCountriesState[playerCountryId];
+                if (!playerState.isEliminated && !playerState.atWarWith.includes(country.id) && !playerState.truces.some(t => t.targetCountryId === country.id && t.endTick > currentTickForProcessing)) {
+                    const countryMilitary = country.currentMilitary.army + country.currentMilitary.navy + country.currentMilitary.airforce;
+                    const playerMilitary = playerState.currentMilitary.army + playerState.currentMilitary.navy + playerState.currentMilitary.airforce;
+
+                    if (countryMilitary < playerMilitary * (0.8 + Math.random() * 0.3)) { // AI is weaker
+                        const canDeclareWar = playerState.politicalCapital >= PC_COST_DECLARE_WAR;
+                        if (canDeclareWar && Math.random() < 0.005) { // Low chance per tick to avoid spam
+                             playerState.politicalCapital -= PC_COST_DECLARE_WAR;
+                             playerState.aggressionScore = Math.min(MAX_AGGRESSION, playerState.aggressionScore + AGGRESSION_HIT_DECLARE_WAR * 0.5); // Less aggression for opportunistic war
+
+                            const newWar: WarDetails = {
+                                id: `player_${playerCountryId}_vs_ai_${country.id}_${gameTickDateUpdate.year}-${gameTickDateUpdate.day}-${currentTickForProcessing}`,
+                                attackerId: playerCountryId, // Player declares war via AI
+                                defenderId: country.id,
+                                startDate: gameTickDateUpdate,
+                                ticksToResolution: WAR_TICKS_DURATION + Math.floor(Math.random() * 10) - 5,
+                            };
+                            if (!nextActiveWars.some(w => (w.attackerId === newWar.attackerId && w.defenderId === newWar.defenderId) || (w.attackerId === newWar.defenderId && w.defenderId === newWar.attackerId) )) {
+                                newActiveWarsForTick.push(newWar);
+                                newCountriesState[playerCountryId] = {...playerState, atWarWith: [...playerState.atWarWith, country.id]};
+                                newCountriesState[country.id] = {...country, atWarWith: [...country.atWarWith, playerCountryId]};
+                                const warDeclarationMessage = `[외교 자동 위임] ${playerState.국가명}이(가) 약소국 ${country.국가명}에 선전포고했습니다!`;
+                                setGameMessage(warDeclarationMessage);
+                                addLogEntry(warDeclarationMessage, gameTickDateUpdate);
+                            }
+                        }
+                    }
+                }
+            }
+
           } 
         }); 
         
+        setActiveWars(prev => [...prev.filter(w => !resolvedWarIds.has(w.id)), ...newActiveWarsForTick]);
+
         if (playerCountryId && newCountriesState[playerCountryId] && !newCountriesState[playerCountryId].isEliminated) {
             const playerState = newCountriesState[playerCountryId];
             setPlayerStatHistory(prevHistory => {
@@ -977,7 +1343,7 @@ const App: React.FC = () => {
         let playerIsEliminated = false;
         if (playerCountryId && newCountriesState[playerCountryId]?.isEliminated) {
             playerIsEliminated = true;
-            if (!newCountriesState[playerCountryId].eliminatedTick) { // Ensure tick is set if missed
+            if (!newCountriesState[playerCountryId].eliminatedTick) { 
                 newCountriesState[playerCountryId].eliminatedTick = currentTickForProcessing;
             }
         }
@@ -1054,10 +1420,10 @@ const App: React.FC = () => {
 
 
     return () => clearInterval(intervalId);
-  }, [gameMode, currentGameSpeed, playerCountryId, addLogEntry, activeWars, currentDate, recalculatePolicyEffectModifiers, recalculateNationalSpiritEffectModifiers, autoEnactPolicies, totalTicks, handleEnactPolicy ]); 
+  }, [gameMode, currentGameSpeed, playerCountryId, addLogEntry, activeWars, currentDate, recalculatePolicyEffectModifiers, recalculateNationalSpiritEffectModifiers, autoEnactPolicies, totalTicks, handleEnactPolicy, autoDelegateDiplomacy ]); 
 
 
-  const headerTitle = gameMode === 'setup' ? "World War Simulator: Setup" : `World War Simulator: ${currentDate.year}년 ${currentDate.day}일 (${ALL_ERAS[currentDate.currentEraId]?.name || '시작의 시대'})`;
+  const headerTitle = gameMode === 'setup' ? "World War Simulator: Setup" : `World War Simulator: ${currentDate.year}년 ${currentDate.day}일`;
 
   const handleRestartFromModal = () => {
     setIsSummaryModalOpen(false);
@@ -1097,11 +1463,21 @@ const App: React.FC = () => {
           allPolicies={ALL_POLICIES}
           autoEnactPolicies={autoEnactPolicies}
           onToggleAutoEnactPolicies={handleToggleAutoEnactPolicies}
+          autoDelegateDiplomacy={autoDelegateDiplomacy}
+          onToggleAutoDelegateDiplomacy={handleToggleAutoDelegateDiplomacy}
           allNationalSpirits={ALL_NATIONAL_SPIRITS} 
           currentDate={currentDate}
           onUpdateDefenseBudgetRatio={handleUpdateDefenseBudgetRatio}
           onUpdateCivilianAllocation={handleUpdateCivilianAllocation}
           onToggleAutoManageBudget={handleToggleAutoManageBudget}
+          onImproveRelations={handleImproveRelations}
+          onHarmRelations={handleHarmRelations}
+          onProposeAlliance={handleProposeAlliance}
+          onBreakAlliance={handleBreakAlliance}
+          onOfferTruce={handleOfferTruce}
+          onDeclareWar={handleDeclareWar}
+          onRespondToDiplomaticProposal={handleRespondToDiplomaticProposal}
+          totalTicks={totalTicks}
         />
       </main>
 

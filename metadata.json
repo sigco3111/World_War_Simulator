@@ -1,5 +1,5 @@
 {
-  "name": "Interactive SVG World Map",
+  "name": "World War Simulator",
   "description": "A responsive and interactive SVG world map displaying countries, built with React, D3.js, TopoJSON, and styled with Tailwind CSS. Hover over countries to see their names and highlight them.",
   "requestFramePermissions": [],
   "prompt": ""

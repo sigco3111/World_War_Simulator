@@ -1,8 +1,7 @@
 
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import * as d3Geo from 'd3-geo';
-// Note: BoundingBox import seems unused and potentially problematic if not a proper export from d3-geo.
-// import * as BoundingBox from 'd3-geo/src/path/bounds'; 
 import * as topojsonClient from 'topojson-client';
 import { Feature, FeatureCollection, Geometry, Point } from 'geojson';
 import { Topology } from 'topojson-specification';
@@ -10,11 +9,13 @@ import { select } from 'd3-selection';
 import * as d3Zoom from 'd3-zoom';
 import type { ZoomTransform } from 'd3-zoom';
 import { CountryDetails } from '../data/countryData'; 
-import type { GameMode, CountryInGame, WarDetails, PolicyEffect as PolicyEffectType, NationalSpirit, OccupiedTerritory, GameDate, CivilianBudgetAllocation } from '../game/types';
+import type { GameMode, CountryInGame, WarDetails, PolicyEffect as PolicyEffectType, NationalSpirit, OccupiedTerritory, GameDate, CivilianBudgetAllocation, DiplomaticProposal } from '../game/types';
 import { EffectStats, MAX_RESISTANCE_LEVEL, RESISTANCE_INCOME_PENALTY_FACTOR, REBEL_STRENGTH_DISRUPTION_THRESHOLD } from '../game/types';
 import type { Policy, ALL_POLICIES as AllPoliciesType } from '../game/policies';
 import { ALL_ERAS } from '../game/eras';
 import BudgetControlsPanel from './BudgetControlsPanel';
+import DiplomacyPanel from './DiplomacyPanel'; 
+import PolicyPanel from './PolicyPanel'; // Import the new PolicyPanel
 
 
 interface CountryProperties { name: string; }
@@ -51,11 +52,22 @@ interface WorldMapProps {
   allPolicies: typeof AllPoliciesType;
   autoEnactPolicies: boolean;
   onToggleAutoEnactPolicies: () => void;
+  autoDelegateDiplomacy: boolean; // New prop for diplomacy auto-delegation
+  onToggleAutoDelegateDiplomacy: () => void; // Handler for diplomacy auto-delegation
   allNationalSpirits: Record<string, NationalSpirit>; 
   currentDate: GameDate;
   onUpdateDefenseBudgetRatio: (countryId: string, newRatio: number) => void;
   onUpdateCivilianAllocation: (countryId: string, newAllocation: CivilianBudgetAllocation) => void;
-  onToggleAutoManageBudget: (countryId: string) => void;
+  onToggleAutoManageBudget: (countryId: string) => void; // Player's budget delegation
+  // Diplomacy Handlers
+  onImproveRelations: (sourceId: string, targetId: string) => void;
+  onHarmRelations: (sourceId: string, targetId: string) => void;
+  onProposeAlliance: (sourceId: string, targetId: string) => void;
+  onBreakAlliance: (sourceId: string, allyIdToBreak: string) => void;
+  onOfferTruce: (sourceId: string, targetId: string) => void;
+  onDeclareWar: (attackerId: string, defenderId: string) => void;
+  onRespondToDiplomaticProposal: (respondingCountryId: string, proposalId: string, accepted: boolean) => void;
+  totalTicks: number;
 }
 
 const getPolicyEffectText = (effect: PolicyEffectType): string => {
@@ -112,21 +124,13 @@ const getPolicyEffectText = (effect: PolicyEffectType): string => {
 
 
 const WorldMap: React.FC<WorldMapProps> = ({
-  gameMode,
-  allCountriesState,
-  activeWars,
-  playerCountryId,
-  onStartGame,
-  allCountryDetails, 
-  onEnactPolicy,
-  allPolicies,
-  autoEnactPolicies,
-  onToggleAutoEnactPolicies,
+  gameMode, allCountriesState, activeWars, playerCountryId, onStartGame, allCountryDetails, 
+  onEnactPolicy, allPolicies, autoEnactPolicies, onToggleAutoEnactPolicies, 
+  autoDelegateDiplomacy, onToggleAutoDelegateDiplomacy, // Added diplomacy auto-delegate props
   allNationalSpirits, 
-  currentDate,
-  onUpdateDefenseBudgetRatio,
-  onUpdateCivilianAllocation,
-  onToggleAutoManageBudget,
+  currentDate, onUpdateDefenseBudgetRatio, onUpdateCivilianAllocation, onToggleAutoManageBudget,
+  onImproveRelations, onHarmRelations, onProposeAlliance, onBreakAlliance, onOfferTruce, onDeclareWar,
+  onRespondToDiplomaticProposal, totalTicks
 }) => {
   const [geoData, setGeoData] = useState<CountryFeatureCollection | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -138,7 +142,7 @@ const WorldMap: React.FC<WorldMapProps> = ({
 
   const [panelCountryId, setPanelCountryId] = useState<string | number | null>(null);
   const [isInfoPanelOpen, setIsInfoPanelOpen] = useState<boolean>(false);
-  const [activeInfoPanelTab, setActiveInfoPanelTab] = useState<'details' | 'policies' | 'budget'>('details');
+  const [activeInfoPanelTab, setActiveInfoPanelTab] = useState<'details' | 'policies' | 'budget' | 'diplomacy'>('details');
 
 
   const svgContainerRef = useRef<HTMLDivElement>(null);
@@ -167,7 +171,7 @@ const WorldMap: React.FC<WorldMapProps> = ({
     if (!svgRef.current || !geoData) return;
     const svgElement = select(svgRef.current);
     const zoomBehavior = d3Zoom.zoom<SVGSVGElement, unknown>()
-      .scaleExtent([1, 10]) // Increased max zoom
+      .scaleExtent([1, 10]) 
       .translateExtent([[0, 0], [SVG_WIDTH, SVG_HEIGHT]])
       .on('zoom', (event: d3Zoom.D3ZoomEvent<SVGSVGElement, unknown>) => {
         setCurrentTransform(event.transform);
@@ -176,7 +180,7 @@ const WorldMap: React.FC<WorldMapProps> = ({
     return () => { svgElement.on('.zoom', null); };
   }, [geoData]);
 
-  const projection = useMemo(() => geoData ? d3Geo.geoMercator().fitSize([SVG_WIDTH, SVG_HEIGHT], geoData) : null, [geoData]); // Using Mercator for better shape preservation
+  const projection = useMemo(() => geoData ? d3Geo.geoMercator().fitSize([SVG_WIDTH, SVG_HEIGHT], geoData) : null, [geoData]);
   const pathGenerator = useMemo(() => projection ? d3Geo.geoPath().projection(projection) : null, [projection]);
 
   const countryIdToFeatureMap = useMemo(() => {
@@ -228,7 +232,8 @@ const WorldMap: React.FC<WorldMapProps> = ({
       } else {
         setPanelCountryId(targetIdForPanel);
         setIsInfoPanelOpen(true);
-        setActiveInfoPanelTab('details'); 
+        // Always default to 'details' tab when opening/switching panel
+        setActiveInfoPanelTab('details');
       }
     }
   }, [panelCountryId, isInfoPanelOpen, getOwnerStateOfFeature]);
@@ -246,9 +251,8 @@ const WorldMap: React.FC<WorldMapProps> = ({
 
   const currentPanelOriginalDetails: CountryDetails | undefined = useMemo(() => {
     if (!panelCountryId) return undefined;
-    // If panelCountryId is an owner, get their details, else get original territory details
     const dynamicData = allCountriesState[panelCountryId.toString()];
-    if (dynamicData) return allCountryDetails[dynamicData.id] || allCountryDetails["DEFAULT"]; // Use actual ID of owner for original details
+    if (dynamicData) return allCountryDetails[dynamicData.id] || allCountryDetails["DEFAULT"];
     return allCountryDetails[panelCountryId.toString()] || allCountryDetails["DEFAULT"];
   }, [panelCountryId, allCountryDetails, allCountriesState]);
   
@@ -260,33 +264,12 @@ const WorldMap: React.FC<WorldMapProps> = ({
 
   const currentPanelOwnerState: CountryInGame | null = useMemo(() => {
       if (!panelCountryId) return null;
-      // This needs to be smarter. If panelCountryId refers to a *feature* that's occupied,
-      // getOwnerStateOfFeature will give the owner. But if panelCountryId *is* the owner's ID,
-      // then it should just return that country's state.
       const directState = allCountriesState[panelCountryId.toString()];
       if (directState && !directState.isEliminated) return directState;
-      return getOwnerStateOfFeature(panelCountryId); // Fallback if panelCountryId was a featureID
+      return getOwnerStateOfFeature(panelCountryId); 
   }, [panelCountryId, getOwnerStateOfFeature, allCountriesState]);
 
-
   const playerCountryState = playerCountryId ? allCountriesState[playerCountryId] : null;
-
-  const availablePoliciesForPlayer: Policy[] = useMemo(() => {
-    if (!playerCountryState || gameMode === 'setup' || gameMode === 'gameOver') return [];
-    return Object.values(allPolicies).filter(policy => {
-        if (playerCountryState.activePolicies.includes(policy.id)) return false; 
-        if (policy.prerequisites?.eraRequirement && policy.prerequisites.eraRequirement !== currentDate.currentEraId) return false;
-        if (policy.prerequisites?.techLevel && (playerCountryState.기술력 || 0) < policy.prerequisites.techLevel) return false;
-        if (policy.cost.politicalCapital && playerCountryState.politicalCapital < policy.cost.politicalCapital) return false;
-        return true;
-    }).sort((a,b) => (a.cost.politicalCapital || 0) - (b.cost.politicalCapital || 0));
-  }, [playerCountryState, allPolicies, gameMode, currentDate]);
-
-  const activePlayerPolicies: Policy[] = useMemo(() => {
-    if (!playerCountryState) return [];
-    return playerCountryState.activePolicies.map(id => allPolicies[id]).filter(p => p);
-  }, [playerCountryState, allPolicies]);
-
 
   if (loading) return <div className="flex items-center justify-center h-[600px] text-sky-400 text-lg">지도 데이터 로딩 중...</div>;
   if (error) return <div className="flex items-center justify-center h-[600px] text-red-400 text-lg">오류: {error}</div>;
@@ -294,12 +277,6 @@ const WorldMap: React.FC<WorldMapProps> = ({
 
   const tooltipOwnerState = getOwnerStateOfFeature(tooltipHoveredId);
   const tooltipText = tooltipOwnerState?.국가명 || geoData?.features.find(f=>f.id === tooltipHoveredId)?.properties.name || "";
-
-  const renderPolicyEffects = (policy: Policy) => {
-    return policy.effects.map((effect, i) => (
-      <li key={i} className="text-xs">{getPolicyEffectText(effect)}</li>
-    ));
-  };
 
   const renderInfoPanelContent = () => {
     if (!currentPanelOriginalDetails) return null;
@@ -310,22 +287,21 @@ const WorldMap: React.FC<WorldMapProps> = ({
     if (gameMode === 'setup') {
         displayData = currentPanelOriginalDetails;
     } else {
-        if (currentPanelOwnerState) { // If there's an owner, display owner's data but with original territory name as title if panel ID was a feature ID
+        if (currentPanelOwnerState) { 
             displayData = currentPanelOwnerState;
             effectiveCountryName = currentPanelOwnerState.id === panelCountryId.toString() ? currentPanelOwnerState.국가명 : currentPanelOriginalDetails.국가명;
-        } else if (currentPanelDynamicData) { // If no owner (e.g. eliminated) but dynamic data for the original feature ID
+        } else if (currentPanelDynamicData) { 
             displayData = currentPanelDynamicData;
             effectiveCountryName = currentPanelDynamicData.국가명;
         } else {
-            displayData = currentPanelOriginalDetails; // Fallback to original static data
+            displayData = currentPanelOriginalDetails; 
         }
     }
-    if (!displayData) displayData = currentPanelOriginalDetails; // Should not happen if currentPanelOriginalDetails is set
+    if (!displayData) displayData = currentPanelOriginalDetails; 
 
     const displayDataAsGameCountry = displayData as CountryInGame; 
     const isOriginalCountryEliminated = gameMode !== 'setup' && allCountriesState[currentPanelOriginalDetails.id]?.isEliminated === true;
     const isTerritoryOwnedByOther = currentPanelOwnerState && currentPanelOwnerState.id !== currentPanelOriginalDetails.id;
-
 
     return (
       <>
@@ -366,6 +342,12 @@ const WorldMap: React.FC<WorldMapProps> = ({
               <div className="mb-2">
                   <dt className="text-sm font-medium text-slate-400">교전중인 국가:</dt>
                   <dd className="text-red-400">{displayDataAsGameCountry.atWarWith.map(id => allCountriesState[id]?.국가명 || id).join(', ')}</dd>
+              </div>
+            )}
+             {displayDataAsGameCountry.allies?.length > 0 && (
+              <div className="mb-2">
+                  <dt className="text-sm font-medium text-slate-400">동맹:</dt>
+                  <dd className="text-green-400">{displayDataAsGameCountry.allies.map(id => allCountriesState[id]?.국가명 || id).join(', ')}</dd>
               </div>
             )}
           </>
@@ -484,6 +466,29 @@ const WorldMap: React.FC<WorldMapProps> = ({
     );
   };
 
+  const renderAutoDelegateToggle = (
+    label: string, 
+    isAuto: boolean, 
+    toggleHandler: () => void,
+    isActiveTab: boolean
+  ) => {
+    if (!isActiveTab || !playerCountryState || currentPanelOwnerState?.id !== playerCountryId) return null;
+    return (
+      <div className="flex items-center space-x-1 sm:space-x-2">
+          <span className="text-xs text-slate-400">{label}:</span>
+          <button
+              onClick={toggleHandler}
+              className={`relative inline-flex items-center h-5 w-9 sm:h-6 sm:w-11 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 focus:ring-offset-slate-800 rounded-full
+                  ${isAuto ? 'bg-sky-500' : 'bg-slate-600'}`}
+              role="switch" aria-checked={isAuto}
+          >
+              <span className={`inline-block w-3 h-3 sm:w-4 sm:h-4 transform bg-white rounded-full transition-transform duration-200 ease-in-out 
+                  ${isAuto ? 'translate-x-5 sm:translate-x-6' : 'translate-x-1'}`}/>
+          </button>
+      </div>
+    );
+  }
+
 
   return (
     <div ref={svgContainerRef} className="relative w-full aspect-[960/600]" onMouseMove={handleMouseMove}>
@@ -504,9 +509,14 @@ const WorldMap: React.FC<WorldMapProps> = ({
                     displayColor = 'fill-slate-600'; 
                  } else if (ownerState.isPlayer) {
                     displayColor = 'fill-green-500'; 
-                 } else if (ownerState.atWarWith && ownerState.atWarWith.length > 0) {
+                 } else if (ownerState.allies.includes(playerCountryId || "")) {
+                    displayColor = 'fill-emerald-400'; 
+                 } else if (ownerState.atWarWith && ownerState.atWarWith.includes(playerCountryId || "")) {
                     displayColor = 'fill-red-500'; 
-                 } else {
+                 } else if (ownerState.atWarWith && ownerState.atWarWith.length > 0) {
+                    displayColor = 'fill-rose-500'; 
+                 }
+                  else {
                     displayColor = 'fill-slate-300'; 
                  }
             } else {
@@ -520,7 +530,6 @@ const WorldMap: React.FC<WorldMapProps> = ({
 
             const isHovered = tooltipHoveredId === featureId;
             const isSelectedForPanel = (panelCountryId === featureId || (currentPanelOwnerState && currentPanelOwnerState.territories.includes(featureId.toString()))) && isInfoPanelOpen;
-
 
             return (
               <path
@@ -541,7 +550,6 @@ const WorldMap: React.FC<WorldMapProps> = ({
               />
             );
           })}
-           {/* War Lines */}
            {gameMode === 'playing' && activeWars.map(war => {
             const attackerFeature = countryIdToFeatureMap.get(war.attackerId);
             const defenderFeature = countryIdToFeatureMap.get(war.defenderId);
@@ -558,32 +566,22 @@ const WorldMap: React.FC<WorldMapProps> = ({
 
             const [x0, y0] = p0;
             const [x2, y2] = p2;
-
-            // Calculate control point for quadratic Bezier curve
             const midX = (x0 + x2) / 2;
             const midY = (y0 + y2) / 2;
             const dx = x2 - x0;
             const dy = y2 - y0;
             const dist = Math.sqrt(dx * dx + dy * dy);
-            const controlPointOffset = dist * 0.15; // Adjust this factor for curve intensity
-
-            // Perpendicular vector
+            const controlPointOffset = dist * 0.15; 
             let ctrlX = midX - dy * (controlPointOffset / dist);
             let ctrlY = midY + dx * (controlPointOffset / dist);
-            
-            // Ensure control point is not NaN if dist is 0
-            if (isNaN(ctrlX) || isNaN(ctrlY)) {
-                ctrlX = midX;
-                ctrlY = midY;
-            }
-
+            if (isNaN(ctrlX) || isNaN(ctrlY)) { ctrlX = midX; ctrlY = midY; }
             const pathData = `M ${x0},${y0} Q ${ctrlX},${ctrlY} ${x2},${y2}`;
             
             return (
               <path
                 key={war.id}
                 d={pathData}
-                stroke="rgba(14, 165, 233, 0.7)" // Changed from red (239,68,68) to blue (sky-500 equivalent)
+                stroke="rgba(239, 68, 68, 0.6)" 
                 strokeWidth={Math.max(0.5, 2 / currentTransform.k)}
                 fill="none"
                 strokeDasharray={`${Math.max(1, 5 / currentTransform.k)},${Math.max(1, 3 / currentTransform.k)}`}
@@ -612,115 +610,95 @@ const WorldMap: React.FC<WorldMapProps> = ({
             role="dialog" aria-modal="true" aria-labelledby="info-panel-title" tabIndex={-1}
           >
             <div className="flex-grow">
-              { /* Title is now rendered inside renderInfoPanelContent for dynamic naming */ }
               
-
-              {gameMode !== 'setup' && playerCountryId === (currentPanelOwnerState?.id) && currentPanelOwnerState && !currentPanelOwnerState.isEliminated && (
+              {gameMode !== 'setup' && currentPanelOwnerState && !currentPanelOwnerState.isEliminated && (
                  <div className="mb-4 border-b border-slate-700">
-                    <nav className="-mb-px flex space-x-2 items-center justify-between" aria-label="Tabs">
+                    <nav className="-mb-px flex space-x-1 items-center justify-between" aria-label="Tabs">
                       <div className="flex space-x-1 sm:space-x-2">
                         <button onClick={() => setActiveInfoPanelTab('details')}
                             className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
                                 ${activeInfoPanelTab === 'details' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
                             상세 정보
                         </button>
-                        <button onClick={() => setActiveInfoPanelTab('policies')}
-                             className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
-                                ${activeInfoPanelTab === 'policies' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
-                            정책 ({playerCountryState?.politicalCapital !== undefined ? playerCountryState.politicalCapital.toFixed(0) : 'N/A'} PC)
-                        </button>
-                         <button onClick={() => setActiveInfoPanelTab('budget')}
-                             className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
-                                ${activeInfoPanelTab === 'budget' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
-                            예산 관리
-                        </button>
-                      </div>
-                      {activeInfoPanelTab === 'policies' && (
-                        <div className="flex items-center space-x-1 sm:space-x-2">
-                            <span className="text-xs text-slate-400">자동 위임:</span>
-                            <button
-                                onClick={onToggleAutoEnactPolicies}
-                                className={`relative inline-flex items-center h-5 w-9 sm:h-6 sm:w-11 transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-sky-500 focus:ring-offset-slate-800 rounded-full
-                                    ${autoEnactPolicies ? 'bg-sky-500' : 'bg-slate-600'}`}
-                                role="switch"
-                                aria-checked={autoEnactPolicies}
-                            >
-                                <span className={`inline-block w-3 h-3 sm:w-4 sm:h-4 transform bg-white rounded-full transition-transform duration-200 ease-in-out 
-                                    ${autoEnactPolicies ? 'translate-x-5 sm:translate-x-6' : 'translate-x-1'}`}/>
+                        {playerCountryId === currentPanelOwnerState.id && (
+                          <>
+                            <button onClick={() => setActiveInfoPanelTab('policies')}
+                                className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
+                                    ${activeInfoPanelTab === 'policies' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
+                                정책 ({playerCountryState?.politicalCapital !== undefined ? playerCountryState.politicalCapital.toFixed(0) : 'N/A'} PC)
                             </button>
-                        </div>
-                      )}
+                            <button onClick={() => setActiveInfoPanelTab('budget')}
+                                className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
+                                    ${activeInfoPanelTab === 'budget' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
+                                예산
+                            </button>
+                             <button onClick={() => setActiveInfoPanelTab('diplomacy')}
+                                className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
+                                    ${activeInfoPanelTab === 'diplomacy' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
+                                외교
+                            </button>
+                          </>
+                        )}
+                        {playerCountryId && currentPanelOwnerState.id !== playerCountryId && (
+                           <button onClick={() => setActiveInfoPanelTab('diplomacy')}
+                                className={`whitespace-nowrap py-3 px-1 sm:px-2 border-b-2 font-medium text-xs sm:text-sm
+                                    ${activeInfoPanelTab === 'diplomacy' ? 'border-sky-400 text-sky-400' : 'border-transparent text-slate-400 hover:text-slate-200 hover:border-slate-300'}`}>
+                                외교 (플레이어)
+                            </button>
+                        )}
+                      </div>
+                      {/* Auto-delegate Toggles */}
+                      {renderAutoDelegateToggle("정책 자동", autoEnactPolicies, onToggleAutoEnactPolicies, activeInfoPanelTab === 'policies')}
+                      {playerCountryState && renderAutoDelegateToggle("예산 자동", playerCountryState.autoManageBudget, () => onToggleAutoManageBudget(playerCountryId!), activeInfoPanelTab === 'budget')}
+                      {renderAutoDelegateToggle("외교 자동", autoDelegateDiplomacy, onToggleAutoDelegateDiplomacy, activeInfoPanelTab === 'diplomacy')}
                     </nav>
                 </div>
               )}
 
              {activeInfoPanelTab === 'details' && renderInfoPanelContent()}
+
              {activeInfoPanelTab === 'policies' && playerCountryState && !playerCountryState.isEliminated && currentPanelOwnerState?.id === playerCountryId && (
-                <div className="space-y-6 py-2">
-                    <div>
-                        <h3 className="text-lg font-semibold text-sky-300 mb-2">제정 가능한 정책</h3>
-                        {availablePoliciesForPlayer.length > 0 ? (
-                            <ul className="space-y-3">
-                                {availablePoliciesForPlayer.map(policy => (
-                                    <li key={policy.id} className="p-3 bg-slate-700 rounded-md shadow">
-                                        <div className="flex justify-between items-start">
-                                            <div>
-                                                <h4 className="text-md font-semibold text-sky-200">{policy.icon} {policy.name} <span className="text-xs text-slate-400">({policy.category})</span></h4>
-                                                <p className="text-xs text-slate-300 mt-1 mb-2">{policy.description}</p>
-                                                <div className="text-xs text-slate-400">
-                                                    <p>비용: {policy.cost.politicalCapital ? `${policy.cost.politicalCapital}PC ` : ''} {policy.cost.gdpFactor ? `${(policy.cost.gdpFactor * 100).toFixed(1)}% GDP` : ''}</p>
-                                                    {policy.prerequisites?.techLevel && <p>요구 기술: {policy.prerequisites.techLevel}</p>}
-                                                    {policy.prerequisites?.eraRequirement && <p>요구 시대: {ALL_ERAS[policy.prerequisites.eraRequirement]?.name || policy.prerequisites.eraRequirement}</p>}
-                                                    <p className="font-medium mt-1 text-sky-300">효과:</p>
-                                                    <ul className="list-disc list-inside pl-2">{renderPolicyEffects(policy)}</ul>
-                                                </div>
-                                            </div>
-                                             <button
-                                                onClick={() => playerCountryId && onEnactPolicy(playerCountryId, policy.id)}
-                                                className="ml-2 px-3 py-1.5 text-xs bg-sky-600 hover:bg-sky-700 text-white font-semibold rounded-md transition-colors shrink-0"
-                                                disabled={autoEnactPolicies || (playerCountryState?.politicalCapital || 0) < (policy.cost.politicalCapital || 0)} 
-                                            >
-                                                제정
-                                            </button>
-                                        </div>
-                                    </li>
-                                ))}
-                            </ul>
-                        ) : <p className="text-sm text-slate-400">현재 제정 가능한 정책이 없습니다.</p>}
-                    </div>
-                     <div>
-                        <h3 className="text-lg font-semibold text-sky-300 mb-2">활성화된 정책</h3>
-                        {activePlayerPolicies.length > 0 ? (
-                             <ul className="space-y-2">
-                                {activePlayerPolicies.map(policy => (
-                                    <li key={policy.id} className="p-2 bg-slate-600 rounded text-sm">
-                                        {policy.icon} {policy.name}
-                                    </li>
-                                ))}
-                            </ul>
-                        ) : <p className="text-sm text-slate-400">현재 활성화된 정책이 없습니다.</p>}
-                    </div>
-                </div>
+                <PolicyPanel
+                    playerCountryState={playerCountryState}
+                    allPolicies={allPolicies}
+                    currentDate={currentDate}
+                    onEnactPolicy={onEnactPolicy}
+                />
               )}
               {activeInfoPanelTab === 'budget' && playerCountryState && !playerCountryState.isEliminated && playerCountryId && currentPanelOwnerState?.id === playerCountryId && (
                 <BudgetControlsPanel
                     country={playerCountryState}
                     onUpdateDefenseBudgetRatio={(newRatio) => onUpdateDefenseBudgetRatio(playerCountryId, newRatio)}
                     onUpdateCivilianAllocation={(newAlloc) => onUpdateCivilianAllocation(playerCountryId, newAlloc)}
-                    onToggleAutoManageBudget={() => onToggleAutoManageBudget(playerCountryId)}
-                    autoManageBudget={playerCountryState.autoManageBudget}
+                    autoManageBudget={playerCountryState.autoManageBudget} // Pass the state for disabling controls
                 />
               )}
-               {/* Fallback for non-player selected countries or if player is eliminated or if selected panel is not player's owned */}
-              {/* FIX: The condition `activeInfoPanelTab !== 'details'` is redundant if `activeInfoPanelTab` is already 'policies' or 'budget'. Simplified. */}
-              {(activeInfoPanelTab === 'policies' || activeInfoPanelTab === 'budget') && (!playerCountryState || playerCountryState.isEliminated || (currentPanelOwnerState && playerCountryId !== currentPanelOwnerState.id) || (!currentPanelOwnerState && playerCountryId)) && (
-                 renderInfoPanelContent()
+               {activeInfoPanelTab === 'diplomacy' && playerCountryId && currentPanelOwnerState && !currentPanelOwnerState.isEliminated && (
+                <DiplomacyPanel
+                    playerCountryId={playerCountryId}
+                    selectedCountry={currentPanelOwnerState} 
+                    allCountriesState={allCountriesState}
+                    currentDate={currentDate}
+                    onImproveRelations={onImproveRelations}
+                    onHarmRelations={onHarmRelations}
+                    onProposeAlliance={onProposeAlliance}
+                    onBreakAlliance={onBreakAlliance}
+                    onOfferTruce={onOfferTruce}
+                    onDeclareWar={onDeclareWar}
+                    onRespondToDiplomaticProposal={onRespondToDiplomaticProposal}
+                    totalTicks={totalTicks}
+                    autoDelegateDiplomacy={autoDelegateDiplomacy} // Pass this down
+                />
               )}
-              {/* If player is eliminated and trying to access policies/budget of their former country (which is now dead) */}
-               {(activeInfoPanelTab === 'policies' || activeInfoPanelTab === 'budget') && playerCountryState?.isEliminated && currentPanelOriginalDetails.id === playerCountryId && (
-                   renderInfoPanelContent()
-               )}
 
+              {((activeInfoPanelTab === 'policies' || activeInfoPanelTab === 'budget') && 
+                (!playerCountryState || playerCountryState.isEliminated || (currentPanelOwnerState && playerCountryId !== currentPanelOwnerState.id))) && (
+                 renderInfoPanelContent() 
+              )}
+               {playerCountryState?.isEliminated && currentPanelOriginalDetails.id === playerCountryId && 
+                (activeInfoPanelTab === 'policies' || activeInfoPanelTab === 'budget' || activeInfoPanelTab === 'diplomacy') && (
+                   renderInfoPanelContent() 
+               )}
 
             </div>
             <p className="mt-auto pt-3 text-xs text-slate-500 text-center">정보는 예시이며 실제와 다를 수 있습니다.</p>
