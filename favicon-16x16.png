@@ -1,1 +1,20 @@
- 
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- 배경 원 (지구) -->
+  <circle cx="8" cy="8" r="7.5" fill="#1e40af" stroke="#1e3a8a" stroke-width="0.5"/>
+  
+  <!-- 대륙 모양 (간단한 형태) -->
+  <path d="M4 6 Q6 4 8 6 Q10 4 12 6 Q10 8 8 10 Q6 8 4 6" fill="#22c55e" opacity="0.8"/>
+  <path d="M3 9 Q5 8 7 9 Q9 8 11 9 Q10 11 8 12 Q6 11 4 10 Q3 9.5 3 9" fill="#16a34a" opacity="0.7"/>
+  
+  <!-- 전략적 요소 - 십자선 -->
+  <g stroke="#ef4444" stroke-width="0.8" opacity="0.9">
+    <line x1="8" y1="2" x2="8" y2="4"/>
+    <line x1="8" y1="12" x2="8" y2="14"/>
+    <line x1="2" y1="8" x2="4" y2="8"/>
+    <line x1="12" y1="8" x2="14" y2="8"/>
+  </g>
+  
+  <!-- 중앙 포인트 -->
+  <circle cx="8" cy="8" r="1" fill="#fbbf24" opacity="0.9"/>
+  <circle cx="8" cy="8" r="0.5" fill="#f59e0b"/>
+</svg> 
