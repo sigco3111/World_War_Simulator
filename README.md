@@ -2,7 +2,9 @@
 
 D3.js와 React를 기반으로 한 인터랙티브 세계 대전 전략 시뮬레이션 게임입니다. 플레이어는 원하는 국가를 선택하여 복잡한 정치, 경제, 군사 시스템을 통해 세계 패권을 차지하는 것을 목표로 합니다.
 
-실행 주소 : https://dev-canvas-pi.vercel.app/
+실행 주소 : world-war-simulator.vercel.app
+
+https://dev-canvas-pi.vercel.app/
 
 ## ✨ 주요 특징
 
